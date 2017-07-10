@@ -20,10 +20,13 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/config"
@@ -133,6 +136,14 @@ func probeHTTP(ctx context.Context, target string, module Module, registry *prom
 		log.Errorf("Error generating HTTP client: %v", err)
 		return false
 	}
+
+	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		log.Errorf("Error generating cookiejar: %s", err)
+		return false
+	}
+	client.Jar = jar
+	client.Timeout = module.Timeout
 
 	client.CheckRedirect = func(_ *http.Request, via []*http.Request) error {
 		redirects = len(via)
