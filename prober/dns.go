@@ -123,7 +123,7 @@ func validRcode(rcode int, valid []string, logger log.Logger) bool {
 	return false
 }
 
-func ProbeDNS(ctx context.Context, target string, module config.Module, registry *prometheus.Registry, logger log.Logger) bool {
+func ProbeDNS(ctx context.Context, dialid, target string, module config.Module, registry *prometheus.Registry, logger log.Logger, logger2 log.Logger) bool {
 	var dialProtocol string
 	probeDNSAnswerRRSGauge := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "probe_dns_answer_rrs",
@@ -147,6 +147,7 @@ func ProbeDNS(ctx context.Context, target string, module config.Module, registry
 		qt, ok = dns.StringToType[module.DNS.QueryType]
 		if !ok {
 			level.Error(logger).Log("msg", "Invalid query type", "Type seen", module.DNS.QueryType, "Existing types", dns.TypeToString)
+			level.Error(logger2).Log("msg", "Invalid query type", "Type seen", module.DNS.QueryType, "Existing types", dns.TypeToString, "dial_id", dialid)
 			return false
 		}
 	}
@@ -163,14 +164,16 @@ func ProbeDNS(ctx context.Context, target string, module config.Module, registry
 			port = "53"
 			targetAddr = target
 		}
-		ip, _, err = chooseProtocol(ctx, module.DNS.IPProtocol, module.DNS.IPProtocolFallback, targetAddr, registry, logger)
+		ip, _, err = chooseProtocol(ctx, module.DNS.IPProtocol, module.DNS.IPProtocolFallback, dialid, targetAddr, registry, logger, logger2)
 		if err != nil {
 			level.Error(logger).Log("msg", "Error resolving address", "err", err)
+			level.Error(logger2).Log("msg", "Error resolving address", "err", err, "dial_id", dialid)
 			return false
 		}
 		target = net.JoinHostPort(ip.String(), port)
 	} else {
 		level.Error(logger).Log("msg", "Configuration error: Expected transport protocol udp or tcp", "protocol", module.DNS.TransportProtocol)
+		level.Error(logger2).Log("msg", "Configuration error: Expected transport protocol udp or tcp", "protocol", module.DNS.TransportProtocol, "dial_id", dialid)
 		return false
 	}
 
@@ -188,9 +191,11 @@ func ProbeDNS(ctx context.Context, target string, module config.Module, registry
 		srcIP := net.ParseIP(module.DNS.SourceIPAddress)
 		if srcIP == nil {
 			level.Error(logger).Log("msg", "Error parsing source ip address", "srcIP", module.DNS.SourceIPAddress)
+			level.Error(logger2).Log("msg", "Error parsing source ip address", "srcIP", module.DNS.SourceIPAddress, "dial_id", dialid)
 			return false
 		}
 		level.Info(logger).Log("msg", "Using local address", "srcIP", srcIP)
+		level.Info(logger2).Log("msg", "Using local address", "srcIP", srcIP, "dial_id", dialid)
 		client.Dialer = &net.Dialer{}
 		if module.DNS.TransportProtocol == "tcp" {
 			client.Dialer.LocalAddr = &net.TCPAddr{IP: srcIP}
@@ -203,15 +208,17 @@ func ProbeDNS(ctx context.Context, target string, module config.Module, registry
 	msg.SetQuestion(dns.Fqdn(module.DNS.QueryName), qt)
 
 	level.Info(logger).Log("msg", "Making DNS query", "target", target, "dial_protocol", dialProtocol, "query", module.DNS.QueryName, "type", qt)
+	level.Info(logger2).Log("msg", "Making DNS query", "target", target, "dial_protocol", dialProtocol, "query", module.DNS.QueryName, "type", qt, "dial_id", dialid)
 	timeoutDeadline, _ := ctx.Deadline()
 	client.Timeout = time.Until(timeoutDeadline)
 	response, _, err := client.Exchange(msg, target)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error while sending a DNS query", "err", err)
+		level.Error(logger2).Log("msg", "Error while sending a DNS query", "err", err, "dial_id", dialid)
 		return false
 	}
 	level.Info(logger).Log("msg", "Got response", "response", response)
-
+	level.Info(logger2).Log("msg", "Got response", "response", response, "dial_id", dialid)
 	probeDNSAnswerRRSGauge.Set(float64(len(response.Answer)))
 	probeDNSAuthorityRRSGauge.Set(float64(len(response.Ns)))
 	probeDNSAdditionalRRSGauge.Set(float64(len(response.Extra)))
@@ -234,18 +241,24 @@ func ProbeDNS(ctx context.Context, target string, module config.Module, registry
 		return false
 	}
 	level.Info(logger).Log("msg", "Validating Answer RRs")
+	level.Info(logger2).Log("msg", "Validating Answer RRs", "dial_id", dialid)
 	if !validRRs(&response.Answer, &module.DNS.ValidateAnswer, logger) {
 		level.Error(logger).Log("msg", "Answer RRs validation failed")
+		level.Error(logger2).Log("msg", "Answer RRs validation failed", "dial_id", dialid)
 		return false
 	}
 	level.Info(logger).Log("msg", "Validating Authority RRs")
+	level.Info(logger2).Log("msg", "Validating Authority RRs", "dial_id", dialid)
 	if !validRRs(&response.Ns, &module.DNS.ValidateAuthority, logger) {
 		level.Error(logger).Log("msg", "Authority RRs validation failed")
+		level.Error(logger2).Log("msg", "Authority RRs validation failed", "dial_id", dialid)
 		return false
 	}
 	level.Info(logger).Log("msg", "Validating Additional RRs")
+	level.Info(logger2).Log("msg", "Validating Additional RRs", "dial_id", dialid)
 	if !validRRs(&response.Extra, &module.DNS.ValidateAdditional, logger) {
 		level.Error(logger).Log("msg", "Additional RRs validation failed")
+		level.Error(logger2).Log("msg", "Additional RRs validation failed", "dial_id", dialid)
 		return false
 	}
 	return true

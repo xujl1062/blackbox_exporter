@@ -226,7 +226,7 @@ func (t *transport) GotFirstResponseByte() {
 	t.current.responseStart = time.Now()
 }
 
-func ProbeHTTP(ctx context.Context, target string, module config.Module, registry *prometheus.Registry, logger log.Logger) (success bool) {
+func ProbeHTTP(ctx context.Context, dialid, target string, module config.Module, registry *prometheus.Registry, logger log.Logger, logger2 log.Logger) (success bool) {
 	var redirects int
 	var (
 		durationGaugeVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -307,6 +307,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not parse target URL", "err", err)
+		level.Error(logger2).Log("msg", "Could not parse target URL", "err", err, "dial_id", dialid)
 		return false
 	}
 	targetHost, targetPort, err := net.SplitHostPort(targetURL.Host)
@@ -315,9 +316,10 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		targetHost = targetURL.Host
 	}
 
-	ip, lookupTime, err := chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
+	ip, lookupTime, err := chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, dialid, targetHost, registry, logger, logger2)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error resolving address", "err", err)
+		level.Error(logger2).Log("msg", "Error resolving address", "err", err, "dial_id", dialid)
 		return false
 	}
 	durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
@@ -331,6 +333,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	client, err := pconfig.NewClientFromConfig(httpClientConfig, "http_probe", true)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error generating HTTP client", "err", err)
+		level.Error(logger2).Log("msg", "Error generating HTTP client", "err", err, "dial_id", dialid)
 		return false
 	}
 
@@ -338,12 +341,14 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	noServerName, err := pconfig.NewRoundTripperFromConfig(httpClientConfig, "http_probe", true)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error generating HTTP client without ServerName", "err", err)
+		level.Error(logger2).Log("msg", "Error generating HTTP client without ServerName", "err", err, "dial_id", dialid)
 		return false
 	}
 
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
 		level.Error(logger).Log("msg", "Error generating cookiejar", "err", err)
+		level.Error(logger2).Log("msg", "Error generating cookiejar", "err", err, "dial_id", dialid)
 		return false
 	}
 	client.Jar = jar
@@ -355,9 +360,11 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 
 	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
 		level.Info(logger).Log("msg", "Received redirect", "location", r.Response.Header.Get("Location"))
+		level.Info(logger2).Log("msg", "Received redirect", "location", r.Response.Header.Get("Location"), "dial_id", dialid)
 		redirects = len(via)
 		if redirects > 10 || httpConfig.NoFollowRedirects {
 			level.Info(logger).Log("msg", "Not following redirect")
+			level.Info(logger2).Log("msg", "Not following redirect", "dial_id", dialid)
 			return errors.New("don't follow redirects")
 		}
 		return nil
@@ -392,6 +399,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	request = request.WithContext(ctx)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error creating request", "err", err)
+		level.Error(logger2).Log("msg", "Error creating request", "err", err, "dial_id", dialid)
 		return
 	}
 
@@ -417,10 +425,12 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	// Err won't be nil if redirects were turned off. See https://github.com/golang/go/issues/3795
 	if err != nil && resp == nil {
 		level.Error(logger).Log("msg", "Error for HTTP request", "err", err)
+		level.Error(logger2).Log("msg", "Error for HTTP request", "err", err, "dial_id", dialid)
 	} else {
 		requestErrored := (err != nil)
 
 		level.Info(logger).Log("msg", "Received HTTP response", "status_code", resp.StatusCode)
+		level.Info(logger2).Log("msg", "Received HTTP response", "status_code", resp.StatusCode, "dial_id", dialid)
 		if len(httpConfig.ValidStatusCodes) != 0 {
 			for _, code := range httpConfig.ValidStatusCodes {
 				if resp.StatusCode == code {
@@ -431,11 +441,14 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 			if !success {
 				level.Info(logger).Log("msg", "Invalid HTTP response status code", "status_code", resp.StatusCode,
 					"valid_status_codes", fmt.Sprintf("%v", httpConfig.ValidStatusCodes))
+				level.Info(logger2).Log("msg", "Invalid HTTP response status code", "status_code", resp.StatusCode,
+					"valid_status_codes", fmt.Sprintf("%v", httpConfig.ValidStatusCodes), "dial_id", dialid)
 			}
 		} else if 200 <= resp.StatusCode && resp.StatusCode < 300 {
 			success = true
 		} else {
 			level.Info(logger).Log("msg", "Invalid HTTP response status code, wanted 2xx", "status_code", resp.StatusCode)
+			level.Info(logger2).Log("msg", "Invalid HTTP response status code, wanted 2xx", "status_code", resp.StatusCode, "dial_id", dialid)
 		}
 
 		if success && (len(httpConfig.FailIfHeaderMatchesRegexp) > 0 || len(httpConfig.FailIfHeaderNotMatchesRegexp) > 0) {
@@ -460,6 +473,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 			respBodyBytes, err = io.Copy(ioutil.Discard, resp.Body)
 			if err != nil {
 				level.Info(logger).Log("msg", "Failed to read HTTP response body", "err", err)
+				level.Info(logger2).Log("msg", "Failed to read HTTP response body", "err", err, "dial_id", dialid)
 				success = false
 			}
 
@@ -479,6 +493,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		httpVersionNumber, err = strconv.ParseFloat(strings.TrimPrefix(resp.Proto, "HTTP/"), 64)
 		if err != nil {
 			level.Error(logger).Log("msg", "Error parsing version number from HTTP version", "err", err)
+			level.Error(logger2).Log("msg", "Error parsing version number from HTTP version", "err", err, "dial_id", dialid)
 		}
 		probeHTTPVersionGauge.Set(httpVersionNumber)
 
@@ -492,6 +507,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 			}
 			if !found {
 				level.Error(logger).Log("msg", "Invalid HTTP version number", "version", httpVersionNumber)
+				level.Error(logger2).Log("msg", "Invalid HTTP version number", "version", httpVersionNumber, "dial_id", dialid)
 				success = false
 			}
 		}
@@ -513,6 +529,17 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 			"gotConn", trace.gotConn,
 			"responseStart", trace.responseStart,
 			"end", trace.end,
+		)
+		level.Info(logger2).Log(
+			"msg", "Response timings for roundtrip",
+			"roundtrip", i,
+			"start", trace.start,
+			"dnsDone", trace.dnsDone,
+			"connectDone", trace.connectDone,
+			"gotConn", trace.gotConn,
+			"responseStart", trace.responseStart,
+			"end", trace.end,
+			"dial_id", dialid,
 		)
 		// We get the duration for the first request from chooseProtocol.
 		if i != 0 {
@@ -551,10 +578,12 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		probeTLSVersion.WithLabelValues(getTLSVersion(resp.TLS)).Set(1)
 		if httpConfig.FailIfSSL {
 			level.Error(logger).Log("msg", "Final request was over SSL")
+			level.Error(logger2).Log("msg", "Final request was over SSL", "dial_id", dialid)
 			success = false
 		}
 	} else if httpConfig.FailIfNotSSL {
 		level.Error(logger).Log("msg", "Final request was not over SSL")
+		level.Error(logger2).Log("msg", "Final request was not over SSL", "dial_id", dialid)
 		success = false
 	}
 

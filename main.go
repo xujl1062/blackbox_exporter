@@ -102,6 +102,13 @@ func probeHandler(w http.ResponseWriter, r *http.Request, c *config.Config, logg
 		http.Error(w, "Target parameter is missing", http.StatusBadRequest)
 		return
 	}
+	// override the post body
+	body := params.Get("body")
+	if body != "" {
+		module.HTTP.Body = body
+	}
+	// custom param
+	dialid := params.Get("dialid")
 
 	prober, ok := Probers[module.Prober]
 	if !ok {
@@ -111,22 +118,26 @@ func probeHandler(w http.ResponseWriter, r *http.Request, c *config.Config, logg
 
 	sl := newScrapeLogger(logger, moduleName, target)
 	level.Info(sl).Log("msg", "Beginning probe", "probe", module.Prober, "timeout_seconds", timeoutSeconds)
-
+	level.Info(logger).Log("msg", "Beginning probe", "probe", module.Prober, "timeout_seconds", timeoutSeconds, "dial_id", dialid)
 	start := time.Now()
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(probeSuccessGauge)
 	registry.MustRegister(probeDurationGauge)
-	success := prober(ctx, target, module, registry, sl)
+	success := prober(ctx, dialid, target, module, registry, sl, logger)
 	duration := time.Since(start).Seconds()
 	probeDurationGauge.Set(duration)
 	if success {
 		probeSuccessGauge.Set(1)
 		level.Info(sl).Log("msg", "Probe succeeded", "duration_seconds", duration)
+		level.Info(logger).Log("msg", "Probe succeeded", "duration_seconds", duration, "dial_id", dialid)
 	} else {
-		level.Error(sl).Log("msg", "Probe failed", "duration_seconds", duration)
+		level.Error(sl).Log("msg", "Probe failed", "duration_seconds", duration, )
+		level.Error(logger).Log("msg", "Probe failed", "duration_seconds", duration, "dial_id", dialid)
 	}
 
 	debugOutput := DebugOutput(&module, &sl.buffer, registry)
+	// extend log out put
+
 	rh.Add(moduleName, target, debugOutput, success)
 
 	if r.URL.Query().Get("debug") == "true" {

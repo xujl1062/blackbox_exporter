@@ -26,7 +26,7 @@ import (
 )
 
 // Returns the IP for the IPProtocol and lookup time.
-func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol bool, target string, registry *prometheus.Registry, logger log.Logger) (ip *net.IPAddr, lookupTime float64, err error) {
+func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol bool, dialid, target string, registry *prometheus.Registry, logger log.Logger, logger2 log.Logger) (ip *net.IPAddr, lookupTime float64, err error) {
 	var fallbackProtocol string
 	probeDNSLookupTimeSeconds := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "probe_dns_lookup_time_seconds",
@@ -49,6 +49,7 @@ func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol b
 	}
 
 	level.Info(logger).Log("msg", "Resolving target address", "ip_protocol", IPProtocol)
+	level.Info(logger2).Log("msg", "Resolving target address", "ip_protocol", IPProtocol, "dial_id", dialid)
 	resolveStart := time.Now()
 
 	defer func() {
@@ -60,6 +61,7 @@ func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol b
 	ips, err := resolver.LookupIPAddr(ctx, target)
 	if err != nil {
 		level.Error(logger).Log("msg", "Resolution with IP protocol failed", "err", err)
+		level.Error(logger2).Log("msg", "Resolution with IP protocol failed", "err", err, "dial_id", dialid)
 		return nil, 0.0, err
 	}
 
@@ -70,6 +72,7 @@ func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol b
 		case "ip4":
 			if ip.IP.To4() != nil {
 				level.Info(logger).Log("msg", "Resolved target address", "ip", ip.String())
+				level.Info(logger2).Log("msg", "Resolved target address", "ip", ip.String(), "dial_id", dialid)
 				probeIPProtocolGauge.Set(4)
 				return &ip, lookupTime, nil
 			}
@@ -80,6 +83,7 @@ func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol b
 		case "ip6":
 			if ip.IP.To4() == nil {
 				level.Info(logger).Log("msg", "Resolved target address", "ip", ip.String())
+				level.Info(logger2).Log("msg", "Resolved target address", "ip", ip.String(), "dial_id", dialid)
 				probeIPProtocolGauge.Set(6)
 				return &ip, lookupTime, nil
 			}
@@ -101,5 +105,6 @@ func chooseProtocol(ctx context.Context, IPProtocol string, fallbackIPProtocol b
 		probeIPProtocolGauge.Set(6)
 	}
 	level.Info(logger).Log("msg", "Resolved target address", "ip", fallback.String())
+	level.Info(logger2).Log("msg", "Resolved target address", "ip", fallback.String(), "dial_id", dialid)
 	return fallback, lookupTime, nil
 }

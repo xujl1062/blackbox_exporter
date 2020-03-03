@@ -61,7 +61,7 @@ func getICMPSequence() uint16 {
 	return icmpSequence
 }
 
-func ProbeICMP(ctx context.Context, target string, module config.Module, registry *prometheus.Registry, logger log.Logger) (success bool) {
+func ProbeICMP(ctx context.Context, dialid, target string, module config.Module, registry *prometheus.Registry, logger log.Logger, logger2 log.Logger) (success bool) {
 	var (
 		socket      net.PacketConn
 		requestType icmp.Type
@@ -79,9 +79,10 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 
 	registry.MustRegister(durationGaugeVec)
 
-	ip, lookupTime, err := chooseProtocol(ctx, module.ICMP.IPProtocol, module.ICMP.IPProtocolFallback, target, registry, logger)
+	ip, lookupTime, err := chooseProtocol(ctx, module.ICMP.IPProtocol, module.ICMP.IPProtocolFallback, dialid, target, registry, logger, logger2)
 	if err != nil {
 		level.Warn(logger).Log("msg", "Error resolving address", "err", err)
+		level.Warn(logger2).Log("msg", "Error resolving address", "err", err, "dial_id", dialid)
 		return false
 	}
 	durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
@@ -90,13 +91,16 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 	if len(module.ICMP.SourceIPAddress) > 0 {
 		if srcIP = net.ParseIP(module.ICMP.SourceIPAddress); srcIP == nil {
 			level.Error(logger).Log("msg", "Error parsing source ip address", "srcIP", module.ICMP.SourceIPAddress)
+			level.Error(logger2).Log("msg", "Error parsing source ip address", "srcIP", module.ICMP.SourceIPAddress, "dial_id", dialid)
 			return false
 		}
 		level.Info(logger).Log("msg", "Using source address", "srcIP", srcIP)
+		level.Info(logger2).Log("msg", "Using source address", "srcIP", srcIP, "dial_id", dialid)
 	}
 
 	setupStart := time.Now()
 	level.Info(logger).Log("msg", "Creating socket")
+	level.Info(logger2).Log("msg", "Creating socket", "dial_id", dialid)
 	if ip.IP.To4() == nil {
 		requestType = ipv6.ICMPTypeEchoRequest
 		replyType = ipv6.ICMPTypeEchoReply
@@ -107,6 +111,7 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 		icmpConn, err := icmp.ListenPacket("ip6:ipv6-icmp", srcIP.String())
 		if err != nil {
 			level.Error(logger).Log("msg", "Error listening to socket", "err", err)
+			level.Error(logger2).Log("msg", "Error listening to socket", "err", err, "dial_id", dialid)
 			return
 		}
 
@@ -121,6 +126,7 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 		icmpConn, err := net.ListenPacket("ip4:icmp", srcIP.String())
 		if err != nil {
 			level.Error(logger).Log("msg", "Error listening to socket", "err", err)
+			level.Error(logger2).Log("msg", "Error listening to socket", "err", err, "dial_id", dialid)
 			return
 		}
 
@@ -128,6 +134,7 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 			rc, err := ipv4.NewRawConn(icmpConn)
 			if err != nil {
 				level.Error(logger).Log("msg", "Error creating raw connection", "err", err)
+				level.Error(logger2).Log("msg", "Error creating raw connection", "err", err, "dial_id", dialid)
 				return
 			}
 			socket = &v4Conn{c: rc, df: true}
@@ -152,6 +159,7 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 		Data: data,
 	}
 	level.Info(logger).Log("msg", "Creating ICMP packet", "seq", body.Seq, "id", body.ID)
+	level.Info(logger2).Log("msg", "Creating ICMP packet", "seq", body.Seq, "id", body.ID, "dial_id", dialid)
 	wm := icmp.Message{
 		Type: requestType,
 		Code: 0,
@@ -161,13 +169,16 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 	wb, err := wm.Marshal(nil)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error marshalling packet", "err", err)
+		level.Error(logger2).Log("msg", "Error marshalling packet", "err", err, "dial_id", dialid)
 		return
 	}
 	durationGaugeVec.WithLabelValues("setup").Add(time.Since(setupStart).Seconds())
 	level.Info(logger).Log("msg", "Writing out packet")
+	level.Info(logger2).Log("msg", "Writing out packet", "dial_id", dialid)
 	rttStart := time.Now()
 	if _, err = socket.WriteTo(wb, ip); err != nil {
 		level.Warn(logger).Log("msg", "Error writing to socket", "err", err)
+		level.Warn(logger2).Log("msg", "Error writing to socket", "err", err, "dial_id", dialid)
 		return
 	}
 
@@ -176,6 +187,7 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 	wb, err = wm.Marshal(nil)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error marshalling packet", "err", err)
+		level.Error(logger2).Log("msg", "Error marshalling packet", "err", err, "dial_id", dialid)
 		return
 	}
 
@@ -183,17 +195,21 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 	deadline, _ := ctx.Deadline()
 	if err := socket.SetReadDeadline(deadline); err != nil {
 		level.Error(logger).Log("msg", "Error setting socket deadline", "err", err)
+		level.Error(logger2).Log("msg", "Error setting socket deadline", "err", err, "dial_id", dialid)
 		return
 	}
 	level.Info(logger).Log("msg", "Waiting for reply packets")
+	level.Info(logger2).Log("msg", "Waiting for reply packets", "dial_id", dialid)
 	for {
 		n, peer, err := socket.ReadFrom(rb)
 		if err != nil {
 			if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
 				level.Warn(logger).Log("msg", "Timeout reading from socket", "err", err)
+				level.Warn(logger2).Log("msg", "Timeout reading from socket", "err", err, "dial_id", dialid)
 				return
 			}
 			level.Error(logger).Log("msg", "Error reading from socket", "err", err)
+			level.Error(logger2).Log("msg", "Error reading from socket", "err", err, "dial_id", dialid)
 			continue
 		}
 		if peer.String() != ip.String() {
@@ -207,6 +223,7 @@ func ProbeICMP(ctx context.Context, target string, module config.Module, registr
 		if bytes.Equal(rb[:n], wb) {
 			durationGaugeVec.WithLabelValues("rtt").Add(time.Since(rttStart).Seconds())
 			level.Info(logger).Log("msg", "Found matching reply packet")
+			level.Info(logger2).Log("msg", "Found matching reply packet", "dial_id", dialid)
 			return true
 		}
 	}
